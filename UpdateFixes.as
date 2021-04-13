@@ -1,15 +1,21 @@
 // AngelScript
 // Update Fixes
+// Modify it as you wish
+
+array<bool> g_bWaterJumping(33, false); // MAXCLIENTS + 1
+array<bool> g_bDeadState(33, false);
 
 void PluginInit()
 {
 	g_Module.ScriptInfo.SetAuthor("Sw1ft");
-	g_Module.ScriptInfo.SetContactInfo("Sw1ft#0116");
+	g_Module.ScriptInfo.SetContactInfo("N/A");
 
-	g_Hooks.RegisterHook(Hooks::Player::PlayerTakeDamage, OnPlayerTakeDamage);
 	g_Hooks.RegisterHook(Hooks::Game::EntityCreated, OnEntityCreated);
+	g_Hooks.RegisterHook(Hooks::Player::PlayerPostThink, OnPlayerPostThink);
+	g_Hooks.RegisterHook(Hooks::Player::PlayerTakeDamage, OnPlayerTakeDamage);
 }
 
+// Snark's Collision
 void OnEntityCreated_Post(const int idx)
 {
 	CBaseEntity@ pEntity = g_EntityFuncs.Instance(idx);
@@ -25,89 +31,111 @@ HookReturnCode OnEntityCreated(CBaseEntity@ pEntity)
 	return HOOK_CONTINUE;
 }
 
+// Water Jump / Ladder Fly
+HookReturnCode OnPlayerPostThink(CBasePlayer@ pPlayer)
+{
+	int idx = pPlayer.entindex();
+
+	if (pPlayer.pev.flags & FL_WATERJUMP != 0)
+	{
+		if (!g_bWaterJumping[idx])
+			pPlayer.pev.velocity.z += 8.0f; // #define WJ_HEIGHT 8, done incorrectly but it works
+
+		g_bWaterJumping[idx] = true;
+	}
+	else
+	{
+		g_bWaterJumping[idx] = false;
+	}
+
+	if (!pPlayer.IsAlive())
+	{
+		if (pPlayer.pev.movetype == MOVETYPE_FLY && !g_bDeadState[idx])
+			pPlayer.pev.velocity = Vector(0.0f, 0.0f, 0.0f);
+
+		g_bDeadState[idx] = true;
+	}
+	else
+	{
+		g_bDeadState[idx] = false;
+	}
+
+	return HOOK_CONTINUE;
+}
+
+// Damage Boosting
 HookReturnCode OnPlayerTakeDamage(DamageInfo@ pDamageInfo)
 {
-	string sClassname = pDamageInfo.pInflictor.GetClassname();
-	bool bIsGrenade = (sClassname == "grenade");
-	
-	if (pDamageInfo.pVictim.GetClassname() == "player" && (bIsGrenade || sClassname == "bolt"))
+	if (pDamageInfo.bitsDamageType == DMG_BLAST || pDamageInfo.bitsDamageType == (DMG_BLAST | DMG_ALWAYSGIB))
 	{
 		CBasePlayer@ pPlayer = cast<CBasePlayer@>(pDamageInfo.pVictim);
 		int8 nWaterLevel = pPlayer.pev.waterlevel;
-		float flArmor = pPlayer.pev.armorvalue;
 
-		if (!pPlayer.IsAlive() || nWaterLevel > (bIsGrenade ? WATERLEVEL_FEET : WATERLEVEL_WAIST))
-		{
+		if (nWaterLevel > WATERLEVEL_WAIST)
 			return HOOK_CONTINUE;
-		}
-		
+
 		// Algorithms and constants taken from Half-Life 1 SDK, see 'combat.cpp' >> 'RadiusDamage' and 'DamageForce'
-		float flAdjustedDamage, flDamage, flRadius, falloff;
+		float flAdjustedDamage, falloff;
+		float flArmor = pPlayer.pev.armorvalue;
+		float flDamage = pDamageInfo.pInflictor.pev.dmg;
 
-		if (bIsGrenade)
+		if (flDamage > 0.0f)
 		{
-			flDamage = 100.0f; // grenade damage
-			flRadius = 250.0f; // damage radius, if 'flRadius == 0.0f' then 'flRadius = flDamage * 2.5f'
-			falloff = 0.4f;
-		}
-		else
-		{
-			flDamage = 40.0f; // xbow's bolt damage
-			flRadius = 128.0f; // original radius
-			falloff = 0.3125f;
-		}
+			bool bIsXBow = (pDamageInfo.pInflictor.GetClassname() == "bolt");
 
-		Vector vecSrc = pDamageInfo.pInflictor.pev.origin;
-		vecSrc.z += 1.0f;
-		
-		Vector vecSpot = pPlayer.BodyTarget(vecSrc);
-		// falloff = flDamage / flRadius;
+			falloff = flDamage / (bIsXBow ? 128.0f : flDamage * 2.5f); // falloff = flDamage / flRadius
 
-		flAdjustedDamage = (vecSrc - vecSpot).Length() * falloff;
-		flAdjustedDamage = flDamage - flAdjustedDamage;
-	
-		if (flAdjustedDamage > 0.0f)
-		{
-			// force = dmg * ((32 * 32 * 72.0) / (pev.size.x * pev.size.y * pev.size.z)) * 5; >>> player's box size is 32, 32, 72
-			// when a player is ducking force will be multiplied by 2, but seems in Sven it works differently, or I'm missing something?
-			
-			float flForce = flAdjustedDamage * 5.0f;
-			float flHeightDifference = 36.0f / pPlayer.pev.size.z;
-			
-			flForce *= flHeightDifference; // non-SDK solution
+			Vector vecSrc = pDamageInfo.pInflictor.pev.origin;
+			vecSrc.z += 1.0f;
 
-			Vector vecForce;
-			Vector vecVelocity = pPlayer.pev.velocity;
+			Vector vecSpot = pPlayer.BodyTarget(vecSrc);
 
-			if (!bIsGrenade) // non-SDK
+			flAdjustedDamage = (vecSrc - vecSpot).Length() * falloff;
+			flAdjustedDamage = flDamage - flAdjustedDamage;
+
+			if (flAdjustedDamage > 0.0f)
 			{
-				vecForce = (vecSpot - vecSrc).Normalize() * flForce;
+				// force = dmg * ((32 * 32 * 72.0) / (pev.size.x * pev.size.y * pev.size.z)) * 5; >>> player's box size is 32, 32, 72
+				// when a player is ducking force will be multiplied by 2, but seems in Sven it works differently, or I'm missing something?
 				
-				if (nWaterLevel == WATERLEVEL_WAIST)
-				{
-					vecForce = vecForce * 0.25f;
-				}
+				float flForce = flAdjustedDamage * 5.0f;
+				float flHeightDifference = 36.0f / pPlayer.pev.size.z;
 				
-				if (pPlayer.pev.flags & FL_ONGROUND != 0)
-				{
-					vecForce.z = 0.0f;
-				}
-				else if (flHeightDifference == 1.0f)
-				{
-					vecForce = vecForce * 0.5f;
-				}
-			}
-			else
-			{
-				vecForce = ((pPlayer.pev.flags & FL_ONGROUND != 0) ? vecVelocity.Normalize() : (vecSpot - vecSrc).Normalize()) * flForce;
-			}
+				flForce *= flHeightDifference; // non-SDK solution
 
-			if (flArmor > 0.0f) // non-SDK
-			{
-				vecForce = vecForce * (1.0f / flArmor);
-			}
+				Vector vecForce;
+				Vector vecVelocity = pPlayer.pev.velocity;
 
-			pPlayer.pev.velocity = vecVelocity + vecForce;
+				if (bIsXBow) // non-SDK
+				{
+					vecForce = (vecSpot - vecSrc).Normalize() * flForce;
+					
+					if (nWaterLevel == WATERLEVEL_WAIST)
+					{
+						vecForce = vecForce * 0.25f;
+					}
+					
+					if (pPlayer.pev.flags & FL_ONGROUND != 0)
+					{
+						vecForce.z = 0.0f;
+					}
+					else if (flHeightDifference == 1.0f)
+					{
+						vecForce = vecForce * 0.5f;
+					}
+				}
+				else
+				{
+					vecForce = ((pPlayer.pev.flags & FL_ONGROUND != 0) ? vecVelocity.Normalize() : (vecSpot - vecSrc).Normalize()) * flForce;
+				}
+
+				if (flArmor > 0.0f)
+				{
+					vecForce = vecForce * (1.0f / flArmor);
+				}
+
+				pPlayer.pev.velocity = vecVelocity + vecForce;
+			}
 		}
 	}
 	
